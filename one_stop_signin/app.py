@@ -77,7 +77,7 @@ async def error_text(pg):
     return ""
 
 
-PROFILE_LINKS = ['[data-uia^="profile-link"]', 'a.profile-link', '.choose-profile .profile', 'li.profile a']
+PROFILE_LINKS = ['[data-uia^="profile-selector+tile-"]', '[data-uia^="profile-link"]', 'a.profile-link', '.choose-profile .profile', 'li.profile a']
 
 
 async def profile_links(pg):
@@ -302,7 +302,7 @@ async def pick(req):
 
 
 async def health(req):
-    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.1.0"})
+    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.1.1"})
 
 
 async def startup(app):
