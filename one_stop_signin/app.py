@@ -154,16 +154,26 @@ async def answer(req):
             f = pg.locator('input[name="challengeOtp"]')
         else:
             f = pg.locator('input[name="password"]')
-        await f.click()
-        await f.fill("")
-        await f.press_sequentially(value, delay=50)
-        await pg.wait_for_timeout(500)
-        btn = pg.locator('button[type="submit"], button[data-uia*="submit"]')
-        if await btn.count():
-            await btn.first.click()
+        if not await f.count():
+            step = await screen(pg)
+            if step != "signed_in":
+                return web.json_response({"session": sid, "step": step if step in ("code", "password") else kind, "message": "Netflix moved on to a different screen. Start again."})
         else:
-            await f.press("Enter")
-        step = await wait_screen(pg, {"signed_in"}, 30)
+            await f.click(timeout=10000)
+            await f.fill("", timeout=10000)
+            await f.press_sequentially(value, delay=50, timeout=15000)
+            # Netflix submits a full code by itself; only press the button if we're still on the same screen.
+            step = await wait_screen(pg, {"signed_in"}, 4)
+            if step != "signed_in":
+                try:
+                    btn = pg.locator('button[type="submit"], button[data-uia*="submit"]')
+                    if await btn.count() and await btn.first.is_visible():
+                        await btn.first.click(timeout=5000)
+                    elif await f.count():
+                        await f.press("Enter", timeout=5000)
+                except Exception:
+                    pass  # the page already moved on
+                step = await wait_screen(pg, {"signed_in"}, 30)
         if step != "signed_in":
             return web.json_response({"session": sid, "step": kind, "message": await error_text(pg) or "Netflix didn't accept that. Check it and try again."})
         names = await profiles(pg)
@@ -203,7 +213,7 @@ async def pick(req):
 
 
 async def health(req):
-    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.0.1"})
+    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.0.2"})
 
 
 async def startup(app):
