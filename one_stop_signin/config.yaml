@@ -10,6 +10,9 @@ init: false
 startup: application
 boot: auto
 hassio_api: false
-ports: {}
+ports:
+  8099/tcp: null
+ports_description:
+  8099/tcp: Diagnostics only (leave empty)
 options: {}
 schema: {}

@@ -219,6 +219,19 @@ async def history(req):
         return web.json_response({"error": str(err)}, status=500)
 
 
+async def latest(req):
+    """Diagnostics: read history with the most recently saved sign-in."""
+    files = sorted((f for f in os.listdir(DATA) if f.startswith("netflix_") and f.endswith(".json")), key=lambda f: os.path.getmtime(os.path.join(DATA, f)))
+    if not files:
+        return web.json_response({"error": "no saved sign-in"})
+    acct = files[-1][len("netflix_"):-len(".json")]
+    pg = await account_page(acct)
+    res = await read_history(pg, 10)
+    return web.json_response({"account_age_s": int(time.time() - os.path.getmtime(os.path.join(DATA, files[-1]))), "url": pg.url,
+                              "count": len(res.get("items") or []), "error": res.get("error"),
+                              "titles": [(x.get("seriesTitle") or x.get("title")) for x in (res.get("items") or [])][:10]})
+
+
 async def forget(req):
     data = await req.json()
     acct = data.get("account")
@@ -354,6 +367,7 @@ app.router.add_post("/netflix/answer", answer)
 app.router.add_post("/netflix/profile", pick)
 app.router.add_post("/netflix/history", history)
 app.router.add_post("/netflix/forget", forget)
+app.router.add_get("/netflix/latest", latest)
 app.on_startup.append(startup)
 if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8099")))
