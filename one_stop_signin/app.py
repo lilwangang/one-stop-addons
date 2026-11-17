@@ -1,5 +1,5 @@
 """One Stop Sign-in Helper: drives Netflix's website sign-in in a hidden browser for Home Assistant."""
-import asyncio, os, secrets, time, logging
+import asyncio, json, os, secrets, time, logging
 from aiohttp import web
 from playwright.async_api import async_playwright
 
@@ -88,6 +88,20 @@ async def profile_links(pg):
     return None
 
 
+async def profile_list(pg):
+    """[{guid, name}] from Netflix's 'Who's watching?' screen."""
+    if "/browse" not in pg.url and "/profiles" not in pg.url:
+        await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+    await pg.wait_for_timeout(3000)
+    return await pg.evaluate("""() => [...document.querySelectorAll('[data-uia^="profile-selector+tile-"]')].map(e => ({
+        guid: e.getAttribute('data-uia').split('tile-')[1], name: (e.innerText || '').trim().split('\\n')[0] }))
+        .filter(p => p.guid && p.name)""")
+
+
+def meta_path(acct):
+    return os.path.join(DATA, f"netflix_{acct}.meta.json")
+
+
 async def profiles(pg):
     if "/browse" not in pg.url and "/profiles" not in pg.url:
         await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
@@ -113,15 +127,17 @@ def state_path(acct):
     return os.path.join(DATA, f"netflix_{acct}.json")
 
 
-async def done(sid, profile=None):
+async def done(sid, profile=None, plist=None):
     s = SESSIONS[sid]
     acct = secrets.token_urlsafe(12)
     await s["ctx"].storage_state(path=state_path(acct))
+    with open(meta_path(acct), "w") as fh:
+        json.dump({"profiles": plist or [], "active": (plist or [{}])[0].get("guid")}, fh)
     hist = await read_history(s["pg"], 5)
     await close(sid)
     if hist.get("error"):
         return {"step": "error", "message": "Signed in, but Netflix's history page didn't load: " + hist["error"]}
-    return {"step": "done", "account": acct, "profile": profile, "sample": len(hist.get("items", []))}
+    return {"step": "done", "account": acct, "profile": profile, "profiles": plist or [], "sample": len(hist.get("items", []))}
 
 
 async def read_history(pg, size=40):
@@ -203,14 +219,50 @@ async def account_page(acct):
     return pg
 
 
+def read_meta(acct):
+    try:
+        with open(meta_path(acct)) as fh:
+            return json.load(fh)
+    except Exception:
+        return {"profiles": [], "active": None}
+
+
+async def list_profiles(req):
+    data = await req.json()
+    return web.json_response({"profiles": read_meta(data.get("account")).get("profiles", [])})
+
+
+LOCKS = {}
+
+
 async def history(req):
     data = await req.json()
-    acct = data.get("account")
+    acct, want = data.get("account"), data.get("profile")
     pg = await account_page(acct)
     if pg is None:
         return web.json_response({"error": "unknown_account"}, status=404)
+    lock = LOCKS.setdefault(acct, asyncio.Lock())
+    async with lock:
+        return await _history(acct, pg, want, int(data.get("size", 40)))
+
+
+async def _history(acct, pg, want, size):
+    meta = read_meta(acct)
+    if want and not any(p["guid"] == want for p in meta.get("profiles", [])):
+        match = [p for p in meta.get("profiles", []) if p["name"].lower() == str(want).lower()]
+        want = match[0]["guid"] if match else None
     try:
-        res = await read_history(pg, int(data.get("size", 40)))
+        if want and want != meta.get("active"):
+            await pg.goto(f"https://www.netflix.com/SwitchProfile?tkn={want}", wait_until="domcontentloaded")
+            await pg.wait_for_timeout(2500)
+            if await pg.locator('input[type="password"], [data-uia*="pin"]').count():
+                return web.json_response({"error": "That profile is locked with a PIN"})
+            meta["active"] = want
+            with open(meta_path(acct), "w") as fh:
+                json.dump(meta, fh)
+        res = await read_history(pg, size)
+        res["profile_guid"] = meta.get("active")
+        res["profiles"] = meta.get("profiles", [])
         if not res.get("error"):
             await ACCOUNTS[acct]["ctx"].storage_state(path=state_path(acct))   # keep refreshed sign-in
         return web.json_response(res, status=401 if res.get("error") == "signed_out" else 200)
@@ -316,14 +368,12 @@ async def answer(req):
                 step = await wait_screen(pg, {"signed_in"}, 30)
         if step != "signed_in":
             return web.json_response({"session": sid, "step": kind, "message": await error_text(pg) or "Netflix didn't accept that. Check it and try again."})
-        names = await profiles(pg)
-        if len(names) > 1:
-            return web.json_response({"session": sid, "step": "profiles", "profiles": names})
-        if len(names) == 1:
-            links = await profile_links(pg)
-            await links.nth(0).click()
-            await pg.wait_for_timeout(4000)
-        return web.json_response(await done(sid, names[0] if names else None))
+        plist = await profile_list(pg)
+        if plist:
+            # Open a profile without a PIN; history for each profile is chosen later on the dashboard.
+            await pg.goto(f"https://www.netflix.com/SwitchProfile?tkn={plist[0]['guid']}", wait_until="domcontentloaded")
+            await pg.wait_for_timeout(3000)
+        return web.json_response(await done(sid, None, plist))
     except Exception as err:
         log.exception("answer failed")
         return web.json_response({"session": sid, "step": kind, "message": f"Something went wrong: {err}"})
@@ -353,7 +403,7 @@ async def pick(req):
 
 
 async def health(req):
-    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.1.2"})
+    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.2.0"})
 
 
 async def startup(app):
@@ -368,6 +418,7 @@ app.router.add_post("/netflix/profile", pick)
 app.router.add_post("/netflix/history", history)
 app.router.add_post("/netflix/forget", forget)
 app.router.add_get("/netflix/latest", latest)
+app.router.add_post("/netflix/profiles", list_profiles)
 app.on_startup.append(startup)
 if __name__ == "__main__":
     web.run_app(app, host="0.0.0.0", port=int(os.environ.get("PORT", "8099")))
