@@ -248,6 +248,15 @@ async def history(req):
 
 async def _history(acct, pg, want, size):
     meta = read_meta(acct)
+    if not meta.get("profiles"):          # older sign-ins didn't record the profiles; look them up once
+        try:
+            await pg.goto("https://www.netflix.com/profiles", wait_until="domcontentloaded")
+            meta["profiles"] = await profile_list(pg)
+            log.info("found %d profiles", len(meta["profiles"]))
+            with open(meta_path(acct), "w") as fh:
+                json.dump(meta, fh)
+        except Exception:
+            log.exception("profile lookup failed")
     if want and not any(p["guid"] == want for p in meta.get("profiles", [])):
         match = [p for p in meta.get("profiles", []) if p["name"].lower() == str(want).lower()]
         want = match[0]["guid"] if match else None
@@ -403,7 +412,7 @@ async def pick(req):
 
 
 async def health(req):
-    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.2.0"})
+    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.2.1"})
 
 
 async def startup(app):
