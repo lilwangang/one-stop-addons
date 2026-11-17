@@ -287,8 +287,11 @@ async def latest(req):
         return web.json_response({"error": "no saved sign-in"})
     acct = files[-1][len("netflix_"):-len(".json")]
     pg = await account_page(acct)
-    res = await read_history(pg, 10)
-    return web.json_response({"account_age_s": int(time.time() - os.path.getmtime(os.path.join(DATA, files[-1]))), "url": pg.url,
+    want = req.query.get("profile")
+    async with LOCKS.setdefault(acct, asyncio.Lock()):
+        r = await _history(acct, pg, want, 10)
+    res = json.loads(r.text)
+    return web.json_response({"profiles": [p["name"] for p in res.get("profiles", [])], "active": res.get("profile_guid"), "account_age_s": int(time.time() - os.path.getmtime(os.path.join(DATA, files[-1]))), "url": pg.url,
                               "count": len(res.get("items") or []), "error": res.get("error"),
                               "titles": [(x.get("seriesTitle") or x.get("title")) for x in (res.get("items") or [])][:10]})
 
