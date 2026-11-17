@@ -125,28 +125,67 @@ async def done(sid, profile=None):
 
 
 async def read_history(pg, size=40):
-    """Read viewing activity from inside the signed-in browser (same as netflix.com/viewingactivity)."""
-    if "netflix.com/browse" not in pg.url:
-        await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+    """Open netflix.com/viewingactivity in the signed-in browser and read what it shows.
+
+    Uses the page's own data request when it can see it, otherwise reads the list on screen."""
+    caught = []
+
+    async def on_resp(resp):
+        if "viewingactivity" in resp.url and "json" in (resp.headers.get("content-type") or ""):
+            try:
+                caught.append(await resp.json())
+            except Exception:
+                pass
+
+    pg.on("response", on_resp)
+    try:
+        await pg.goto("https://www.netflix.com/viewingactivity", wait_until="domcontentloaded")
+        url = pg.url
+        log.info("viewingactivity page -> %s", url)
+        if "/login" in url:
+            return {"error": "signed_out"}
+        if "/profiles" in url or await pg.locator('[data-uia^="profile-selector+tile-"]').count():
+            return {"error": "no_profile"}
+        try:
+            await pg.wait_for_selector("li.retableRow, .retableRow, [data-uia*='activity'] li", timeout=15000)
+        except Exception:
+            pass
         await pg.wait_for_timeout(1500)
-    if "/login" in pg.url:
-        return {"error": "signed_out"}
-    return await pg.evaluate("""async (size) => {
-      const html = document.documentElement.innerHTML;
-      let build = (window.netflix && netflix.reactContext && netflix.reactContext.models.serverDefs && netflix.reactContext.models.serverDefs.data.BUILD_IDENTIFIER) || (html.match(/"BUILD_IDENTIFIER":"([^"]+)"/) || [])[1];
-      const tries = [build && `/api/shakti/${build}/viewingactivity`, '/api/shakti/mre/viewingactivity'].filter(Boolean);
-      let last = 'no build id';
-      for (const u of tries) {
-        try {
-          const r = await fetch(`${u}?pg=0&pgSize=${size}`, { credentials: 'include', headers: { Accept: 'application/json' } });
-          if (r.status === 401 || r.status === 403) return { error: 'signed_out' };
-          if (!r.ok) { last = 'HTTP ' + r.status; continue; }
-          const d = await r.json();
-          return { items: d.viewedItems || [], profile: d.profileName || null };
-        } catch (e) { last = String(e); }
-      }
-      return { error: last };
-    }""", size)
+        for d in caught:
+            items = d.get("viewedItems") if isinstance(d, dict) else None
+            if items is not None:
+                return {"items": items[:size], "profile": d.get("profileName")}
+        rows = await pg.evaluate("""() => [...document.querySelectorAll('li.retableRow, .retableRow')].map(r => {
+            const a = r.querySelector('a[href*="/title/"]'), d = r.querySelector('.date, .col.date');
+            const id = a ? (a.getAttribute('href').match(/title\\/(\\d+)/) || [])[1] : null;
+            return { title: a ? a.textContent.trim() : r.textContent.trim(), movieID: id, dateStr: d ? d.textContent.trim() : '' };
+        })""")
+        if rows:
+            out = []
+            for r in rows[:size]:
+                t = r["title"]
+                ts = None
+                try:
+                    from datetime import datetime
+                    for fmt in ("%m/%d/%y", "%d/%m/%y", "%Y-%m-%d", "%m/%d/%Y"):
+                        try:
+                            ts = int(datetime.strptime(r["dateStr"], fmt).timestamp() * 1000)
+                            break
+                        except ValueError:
+                            continue
+                except Exception:
+                    pass
+                series, _, ep = t.partition(": ")
+                item = {"title": t, "movieID": r["movieID"], "date": ts}
+                if ep:
+                    item.update({"seriesTitle": series, "episodeTitle": ep})
+                out.append(item)
+            return {"items": out}
+        body = " ".join((await pg.inner_text("body"))[:300].split())
+        log.info("viewingactivity: nothing readable. Page says: %s", body)
+        return {"error": "Netflix's viewing activity page showed nothing readable"}
+    finally:
+        pg.remove_listener("response", on_resp)
 
 
 async def account_page(acct):
@@ -171,7 +210,6 @@ async def history(req):
     if pg is None:
         return web.json_response({"error": "unknown_account"}, status=404)
     try:
-        await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
         res = await read_history(pg, int(data.get("size", 40)))
         if not res.get("error"):
             await ACCOUNTS[acct]["ctx"].storage_state(path=state_path(acct))   # keep refreshed sign-in
@@ -302,7 +340,7 @@ async def pick(req):
 
 
 async def health(req):
-    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.1.1"})
+    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.1.2"})
 
 
 async def startup(app):
