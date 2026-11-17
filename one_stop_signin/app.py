@@ -203,7 +203,7 @@ async def pick(req):
 
 
 async def health(req):
-    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.0.0"})
+    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.0.1"})
 
 
 async def startup(app):
