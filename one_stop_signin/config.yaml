@@ -1,0 +1,15 @@
+name: One Stop Sign-in Helper
+version: "1.0.0"
+slug: one_stop_signin
+description: Signs in to Netflix from inside Home Assistant so One Stop Streaming cards can show real watch history.
+url: https://github.com/lilwangang/one-stop-addons
+arch:
+  - aarch64
+  - amd64
+init: false
+startup: application
+boot: auto
+hassio_api: false
+ports: {}
+options: {}
+schema: {}
