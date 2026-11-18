@@ -351,9 +351,11 @@ async def debug_rows(req):
           if (!h) return {err: 'no heading', url: location.href, heads: [...document.querySelectorAll('h2')].map(e => e.textContent).slice(0, 5)};
           let r = h, lvl = 0;
           for (; lvl < 8 && r; lvl++) { r = r.parentElement; if (r && r.querySelectorAll('img').length >= 2) break; }
-          const tiles = [...r.querySelectorAll('img')].slice(0, 6).map(img => { let c = img; for (let i = 0; i < 6 && c && !(c.tagName === 'A' || c.getAttribute('role') || c.getAttribute('data-uia')); i++) c = c.parentElement;
-             return { alt: img.alt, tag: c && c.tagName, role: c && c.getAttribute('role'), uia: c && c.getAttribute('data-uia'), href: c && c.getAttribute('href'), aria: c && c.getAttribute('aria-label'), outer: c ? c.outerHTML.slice(0, 600) : '' }; });
-          return { hTag: h.tagName, hCls: h.className, lvl, rowUia: r.getAttribute('data-uia'), rowCls: r.className, tiles };
+          const img = r.querySelector('img.continue-watching-card'); const chain = []; let c = img;
+          for (let k = 0; k < 9 && c && c !== r; k++) { c = c.parentElement; chain.push({ tag: c.tagName, uia: c.getAttribute('data-uia'), aria: c.getAttribute('aria-label'), role: c.getAttribute('role'), href: c.getAttribute('href'), text: (c.textContent || '').slice(0, 150), attrs: [...c.attributes].map(a => a.name).join(',') }); }
+          const tiles = chain;
+          const scripts = [...document.querySelectorAll('script')].map(x => x.textContent).filter(t => /continueWatching|"CONTINUE_WATCHING"/i.test(t)).map(t => t.length);
+          return { scripts, hTag: h.tagName, hCls: h.className, lvl, rowUia: r.getAttribute('data-uia'), rowCls: r.className, tiles };
         }""")
     return web.json_response(info)
 
