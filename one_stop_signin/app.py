@@ -393,7 +393,13 @@ async def probe_va(req):
             await pg.goto("https://www.netflix.com/settings/viewed", wait_until="domcontentloaded"); await pg.wait_for_timeout(8000)
         finally:
             pg.remove_listener("response", on_resp)
-        out = {"url": pg.url, "caught": caught}
+        html = await pg.content()
+        import re as _re
+        hits = []
+        for kw in ["bookmark", "Rookie", "lastWatched", "watchedDate", "viewedDate", "timestamp", "runtime"]:
+            for m in list(_re.finditer(kw, html))[:3]:
+                hits.append({"kw": kw, "ctx": html[max(0, m.start()-300): m.start()+400]})
+        out = {"url": pg.url, "len": len(html), "hits": hits}
     return web.json_response(out)
 
 
