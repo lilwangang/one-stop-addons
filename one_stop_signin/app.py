@@ -379,14 +379,21 @@ async def probe_va(req):
             await pg.goto(f"https://www.netflix.com/SwitchProfile?tkn={g}", wait_until="domcontentloaded"); await pg.wait_for_timeout(2000)
             meta["active"] = g
             with open(meta_path(acct), "w") as fh: json.dump(meta, fh)
-        await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded"); await pg.wait_for_timeout(3000)
-        out = await pg.evaluate("""async () => {
-          const rc = window.netflix && netflix.reactContext; const sd = rc && rc.models && rc.models.serverDefs && rc.models.serverDefs.data;
-          const b = sd && (sd.BUILD_IDENTIFIER || sd.buildIdentifier); const r = { build: b, keys: sd ? Object.keys(sd).slice(0, 40) : null };
-          for (const u of [`/api/shakti/${b}/viewingactivity?pg=0&pgSize=5`, `/api/shakti/mre/viewingactivity?pg=0&pgSize=5`]) {
-            try { const x = await fetch(u, { credentials: 'include' }); r[u] = x.status + ' ' + (await x.text()).slice(0, 1500); } catch (e) { r[u] = String(e); }
-          }
-          return r; }""")
+        caught = []
+        async def on_resp(resp):
+            ct = resp.headers.get("content-type") or ""
+            if "json" in ct or "graphql" in resp.url:
+                try:
+                    t = await resp.text()
+                except Exception:
+                    t = ""
+                caught.append({"url": resp.url[:160], "status": resp.status, "len": len(t), "body": t[:3000] if ("viewed" in t.lower() or "bookmark" in t.lower() or "date" in t.lower()) else t[:200]})
+        pg.on("response", on_resp)
+        try:
+            await pg.goto("https://www.netflix.com/settings/viewed", wait_until="domcontentloaded"); await pg.wait_for_timeout(8000)
+        finally:
+            pg.remove_listener("response", on_resp)
+        out = {"url": pg.url, "caught": caught}
     return web.json_response(out)
 
 
