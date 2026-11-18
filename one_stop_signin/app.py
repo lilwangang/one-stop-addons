@@ -338,12 +338,15 @@ async def debug_rows(req):
         await pg.wait_for_timeout(6000)
         for _ in range(6):
             await pg.mouse.wheel(0, 900); await pg.wait_for_timeout(800)
-        info = await pg.evaluate("""() => ({url: location.href,
-          ctx: [...document.querySelectorAll('[data-list-context]')].map(e => e.getAttribute('data-list-context')).slice(0, 30),
-          heads: [...document.querySelectorAll('h2, .rowHeader, .row-header-title, [class*="rowTitle"]')].map(e => (e.innerText || '').trim()).filter(Boolean).slice(0, 30),
-          cw: (() => { const h = [...document.querySelectorAll('h2,h3,[class*="row"] *')].find(e => /continue watching/i.test(e.innerText || '') && (e.innerText||'').length < 60);
-                 if (!h) return null; let r = h; for (let i = 0; i < 6 && r; i++) { r = r.parentElement; if (r && r.querySelectorAll('a[href*="/watch/"], a[href*="/title/"]').length) break; }
-                 return r ? { cls: r.className, html: r.outerHTML.slice(0, 2500) } : null; })() })""")
+        info = await pg.evaluate("""() => {
+          const h = [...document.querySelectorAll('h2,h3')].find(e => /continue watching/i.test(e.innerText || ''));
+          if (!h) return {err: 'no heading'};
+          let r = h, lvl = 0;
+          for (; lvl < 8 && r; lvl++) { r = r.parentElement; if (r && r.querySelectorAll('img').length >= 2) break; }
+          const tiles = [...r.querySelectorAll('img')].slice(0, 6).map(img => { let c = img; for (let i = 0; i < 6 && c && !(c.tagName === 'A' || c.getAttribute('role') || c.getAttribute('data-uia')); i++) c = c.parentElement;
+             return { alt: img.alt, tag: c && c.tagName, role: c && c.getAttribute('role'), uia: c && c.getAttribute('data-uia'), href: c && c.getAttribute('href'), aria: c && c.getAttribute('aria-label'), outer: c ? c.outerHTML.slice(0, 600) : '' }; });
+          return { lvl, rowUia: r.getAttribute('data-uia'), rowCls: r.className, tiles };
+        }""")
     return web.json_response(info)
 
 
