@@ -140,6 +140,26 @@ async def done(sid, profile=None, plist=None):
     return {"step": "done", "account": acct, "profile": profile, "profiles": plist or [], "sample": len(hist.get("items", []))}
 
 
+EMB = re.compile(r'\{"movieID":\d+,"date":\d+[^{}]*\}')
+
+
+def parse_embedded(html):
+    out, seen = [], set()
+    for m in EMB.finditer(html):
+        raw = re.sub(r"\\x([0-9a-fA-F]{2})", lambda g: "\\u00" + g.group(1), m.group(0))
+        try:
+            x = json.loads(raw)
+        except Exception:
+            continue
+        k = (x.get("movieID"), x.get("date"))
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(x)
+    out.sort(key=lambda x: x.get("date") or 0, reverse=True)
+    return out
+
+
 async def read_history(pg, size=40):
     """Open netflix.com/viewingactivity in the signed-in browser and read what it shows.
 
@@ -171,6 +191,9 @@ async def read_history(pg, size=40):
             items = d.get("viewedItems") if isinstance(d, dict) else None
             if items is not None:
                 return {"items": items[:size], "profile": d.get("profileName")}
+        embedded = parse_embedded(await pg.content())     # page carries the list as JSON with exact start times
+        if embedded:
+            return {"items": embedded[:size]}
         rows = await pg.evaluate("""() => [...document.querySelectorAll('li.retableRow, .retableRow')].map(r => {
             const a = r.querySelector('a[href*="/title/"]'), d = r.querySelector('.date, .col.date');
             const id = a ? (a.getAttribute('href').match(/title\\/(\\d+)/) || [])[1] : null;
