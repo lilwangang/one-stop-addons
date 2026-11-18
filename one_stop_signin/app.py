@@ -204,6 +204,39 @@ async def read_history(pg, size=40):
         pg.remove_listener("response", on_resp)
 
 
+async def read_continue(pg, size=40):
+    """Netflix's 'Continue Watching' row for the active profile (with progress)."""
+    await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+    if "/login" in pg.url:
+        return {"error": "signed_out"}
+    await pg.wait_for_timeout(4000)
+    items = []
+    for _ in range(14):
+        items = await pg.evaluate("""() => {
+          const row = document.querySelector('[data-list-context="continueWatching"]') ||
+            [...document.querySelectorAll('.lolomoRow, [data-list-context]')].find(r => /continue watching/i.test((r.querySelector('h2, .rowHeader, .row-header-title') || {}).innerText || ''));
+          if (!row) return [];
+          const seen = new Set(), out = [];
+          for (const card of row.querySelectorAll('.title-card, .slider-item')) {
+            const a = card.querySelector('a[href*="/watch/"], a[href*="/title/"]'); if (!a) continue;
+            const img = card.querySelector('img');
+            const t = ((a.getAttribute('aria-label') || (img && img.alt) || '').trim());
+            const id = (a.getAttribute('href').match(/(?:watch|title)\/(\d+)/) || [])[1];
+            if (!t || seen.has(id || t)) continue; seen.add(id || t);
+            const bar = card.querySelector('.progress-completed, [class*="progress"] span[style*="width"]');
+            const pct = bar ? parseFloat((bar.style.width || '').replace('%', '')) : null;
+            out.push({ title: t, movieID: id, image: img ? (img.currentSrc || img.src) : null, progress: isNaN(pct) ? null : Math.round(pct) });
+          }
+          return out;
+        }""")
+        if items:
+            break
+        await pg.mouse.wheel(0, 700)
+        await pg.wait_for_timeout(1000)
+    now = int(time.time() * 1000)
+    return {"items": [{**x, "date": now - i * 60000, "nodate": True, "kind": "continue"} for i, x in enumerate(items[:size])]}
+
+
 async def account_page(acct):
     c = ACCOUNTS.get(acct)
     if c and not c["pg"].is_closed():
@@ -243,10 +276,10 @@ async def history(req):
         return web.json_response({"error": "unknown_account"}, status=404)
     lock = LOCKS.setdefault(acct, asyncio.Lock())
     async with lock:
-        return await _history(acct, pg, want, int(data.get("size", 40)))
+        return await _history(acct, pg, want, int(data.get("size", 40)), data.get("kind", "history"))
 
 
-async def _history(acct, pg, want, size):
+async def _history(acct, pg, want, size, kind="history"):
     meta = read_meta(acct)
     if not meta.get("profiles"):          # older sign-ins didn't record the profiles; look them up once
         try:
@@ -269,7 +302,7 @@ async def _history(acct, pg, want, size):
             meta["active"] = want
             with open(meta_path(acct), "w") as fh:
                 json.dump(meta, fh)
-        res = await read_history(pg, size)
+        res = await (read_continue(pg, size) if kind == "continue" else read_history(pg, size))
         res["profile_guid"] = meta.get("active")
         res["profiles"] = meta.get("profiles", [])
         if not res.get("error"):
@@ -289,7 +322,7 @@ async def latest(req):
     pg = await account_page(acct)
     want = req.query.get("profile")
     async with LOCKS.setdefault(acct, asyncio.Lock()):
-        r = await _history(acct, pg, want, 10)
+        r = await _history(acct, pg, want, 10, req.query.get("kind", "history"))
     res = json.loads(r.text)
     return web.json_response({"profiles": [p["name"] for p in res.get("profiles", [])], "active": res.get("profile_guid"), "account_age_s": int(time.time() - os.path.getmtime(os.path.join(DATA, files[-1]))), "url": pg.url,
                               "count": len(res.get("items") or []), "error": res.get("error"),
@@ -690,7 +723,7 @@ async def d_history(req):
 
 
 async def health(req):
-    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.3.0"})
+    return web.json_response({"ok": True, "sessions": len(SESSIONS), "version": "1.4.0"})
 
 
 async def startup(app):
