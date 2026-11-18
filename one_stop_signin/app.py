@@ -402,27 +402,13 @@ async def probe_va(req):
             await pg.goto(f"https://www.netflix.com/SwitchProfile?tkn={g}", wait_until="domcontentloaded"); await pg.wait_for_timeout(2000)
             meta["active"] = g
             with open(meta_path(acct), "w") as fh: json.dump(meta, fh)
-        caught = []
-        async def on_resp(resp):
-            ct = resp.headers.get("content-type") or ""
-            if "json" in ct or "graphql" in resp.url:
-                try:
-                    t = await resp.text()
-                except Exception:
-                    t = ""
-                caught.append({"url": resp.url[:160], "status": resp.status, "len": len(t), "body": t[:3000] if ("viewed" in t.lower() or "bookmark" in t.lower() or "date" in t.lower()) else t[:200]})
-        pg.on("response", on_resp)
-        try:
-            await pg.goto("https://www.netflix.com/settings/viewed", wait_until="domcontentloaded"); await pg.wait_for_timeout(8000)
-        finally:
-            pg.remove_listener("response", on_resp)
-        html = await pg.content()
-        import re as _re
-        hits = []
-        for kw in ["bookmark", "Rookie", "lastWatched", "watchedDate", "viewedDate", "timestamp", "runtime"]:
-            for m in list(_re.finditer(kw, html))[:3]:
-                hits.append({"kw": kw, "ctx": html[max(0, m.start()-300): m.start()+400]})
-        out = {"url": pg.url, "len": len(html), "hits": hits}
+        out = {}
+        for u in ["https://www.netflix.com/account/devices", "https://www.netflix.com/ManageDevices", "https://www.netflix.com/account/streaming-activity", "https://www.netflix.com/viewingactivity?devices=1", "https://www.netflix.com/AccountAccess"]:
+            try:
+                await pg.goto(u, wait_until="domcontentloaded"); await pg.wait_for_timeout(5000)
+                out[u] = {"final": pg.url, "text": " ".join((await pg.inner_text("body")).split())[:2500]}
+            except Exception as e:
+                out[u] = str(e)
     return web.json_response(out)
 
 
