@@ -334,6 +334,16 @@ async def debug_rows(req):
     acct = files[-1][len("netflix_"):-len(".json")]
     pg = await account_page(acct)
     async with LOCKS.setdefault(acct, asyncio.Lock()):
+        want = req.query.get("profile")
+        if want:
+            meta = read_meta(acct)
+            g = next((x["guid"] for x in meta.get("profiles", []) if x["name"].lower() == want.lower()), None)
+            if g:
+                await pg.goto(f"https://www.netflix.com/SwitchProfile?tkn={g}", wait_until="domcontentloaded")
+                await pg.wait_for_timeout(2500)
+                meta["active"] = g
+                with open(meta_path(acct), "w") as fh:
+                    json.dump(meta, fh)
         await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
         await pg.wait_for_timeout(6000)
         info = await pg.evaluate("""() => {
