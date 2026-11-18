@@ -211,28 +211,35 @@ async def read_continue(pg, size=40):
         return {"error": "signed_out"}
     await pg.wait_for_timeout(4000)
     items = []
-    for _ in range(14):
-        items = await pg.evaluate("""() => {
-          const row = document.querySelector('[data-list-context="continueWatching"]') ||
-            [...document.querySelectorAll('.lolomoRow, [data-list-context]')].find(r => /continue watching/i.test((r.querySelector('h2, .rowHeader, .row-header-title') || {}).innerText || ''));
-          if (!row) return [];
-          const seen = new Set(), out = [];
-          for (const card of row.querySelectorAll('.title-card, .slider-item')) {
-            const a = card.querySelector('a[href*="/watch/"], a[href*="/title/"]'); if (!a) continue;
-            const img = card.querySelector('img');
-            const t = ((a.getAttribute('aria-label') || (img && img.alt) || '').trim());
-            const id = (a.getAttribute('href').match(/(?:watch|title)\/(\d+)/) || [])[1];
-            if (!t || seen.has(id || t)) continue; seen.add(id || t);
-            const bar = card.querySelector('.progress-completed, [class*="progress"] span[style*="width"]');
-            const pct = bar ? parseFloat((bar.style.width || '').replace('%', '')) : null;
-            out.push({ title: t, movieID: id, image: img ? (img.currentSrc || img.src) : null, progress: isNaN(pct) ? null : Math.round(pct) });
-          }
-          return out;
-        }""")
-        if items:
+    JS = """() => {
+      const h = [...document.querySelectorAll('h2')].find(e => /continue watching/i.test(e.textContent || ''));
+      const row = h && h.closest('section'); if (!row) return null;
+      return [...row.querySelectorAll('a[data-uia="progress-card"], a[href*="jbv="]')].map(a => {
+        const img = a.querySelector('img');
+        const bar = [...a.querySelectorAll('[style*="width"]')].map(e => parseFloat(e.style.width)).find(w => !isNaN(w) && w > 0 && w <= 100);
+        return { title: (a.getAttribute('aria-label') || '').trim(), movieID: (a.getAttribute('href').match(/jbv=(\\d+)/) || [])[1] || null,
+                 image: img ? (img.currentSrc || img.src) : null, progress: bar != null ? Math.round(bar) : null };
+      }).filter(x => x.title);
+    }"""
+    items, found = [], {}
+    for _ in range(12):
+        got = await pg.evaluate(JS)
+        if got is None:
+            await pg.mouse.wheel(0, 600); await pg.wait_for_timeout(900); continue
+        before = len(found)
+        for x in got:
+            found.setdefault(x["movieID"] or x["title"], x)
+        nxt = pg.locator('section:has(h2:text-matches("continue watching", "i")) button[aria-label*="next" i], section:has(h2:text-matches("continue watching", "i")) [data-uia*="next"]')
+        if len(found) == before and _ > 0 or not await nxt.count():
             break
-        await pg.mouse.wheel(0, 700)
-        await pg.wait_for_timeout(1000)
+        try:
+            await nxt.first.click(timeout=3000); await pg.wait_for_timeout(1200)
+        except Exception:
+            break
+    items = list(found.values())
+    for x in items:
+        if x["movieID"]:
+            x["url"] = f"https://www.netflix.com/title/{x['movieID']}"
     now = int(time.time() * 1000)
     return {"items": [{**x, "date": now - i * 60000, "nodate": True, "kind": "continue"} for i, x in enumerate(items[:size])]}
 
