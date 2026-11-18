@@ -367,6 +367,29 @@ async def debug_rows(req):
     return web.json_response(info)
 
 
+async def probe_va(req):
+    files = sorted((f for f in os.listdir(DATA) if f.startswith("netflix_") and f.endswith(".json") and not f.endswith(".meta.json")), key=lambda f: os.path.getmtime(os.path.join(DATA, f)))
+    acct = files[-1][len("netflix_"):-len(".json")]
+    pg = await account_page(acct)
+    async with LOCKS.setdefault(acct, asyncio.Lock()):
+        meta = read_meta(acct)
+        want = req.query.get("profile")
+        g = next((x["guid"] for x in meta.get("profiles", []) if want and x["name"].lower() == want.lower()), None)
+        if g:
+            await pg.goto(f"https://www.netflix.com/SwitchProfile?tkn={g}", wait_until="domcontentloaded"); await pg.wait_for_timeout(2000)
+            meta["active"] = g
+            with open(meta_path(acct), "w") as fh: json.dump(meta, fh)
+        await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded"); await pg.wait_for_timeout(3000)
+        out = await pg.evaluate("""async () => {
+          const rc = window.netflix && netflix.reactContext; const sd = rc && rc.models && rc.models.serverDefs && rc.models.serverDefs.data;
+          const b = sd && (sd.BUILD_IDENTIFIER || sd.buildIdentifier); const r = { build: b, keys: sd ? Object.keys(sd).slice(0, 40) : null };
+          for (const u of [`/api/shakti/${b}/viewingactivity?pg=0&pgSize=5`, `/api/shakti/mre/viewingactivity?pg=0&pgSize=5`]) {
+            try { const x = await fetch(u, { credentials: 'include' }); r[u] = x.status + ' ' + (await x.text()).slice(0, 1500); } catch (e) { r[u] = String(e); }
+          }
+          return r; }""")
+    return web.json_response(out)
+
+
 async def forget(req):
     data = await req.json()
     acct = data.get("account")
@@ -777,6 +800,7 @@ app.router.add_post("/netflix/history", history)
 app.router.add_post("/netflix/forget", forget)
 app.router.add_get("/netflix/latest", latest)
 app.router.add_get("/netflix/debug_rows", debug_rows)
+app.router.add_get("/netflix/probe_va", probe_va)
 app.router.add_post("/netflix/profiles", list_profiles)
 app.router.add_post("/disney/start", d_start)
 app.router.add_post("/disney/answer", d_answer)
