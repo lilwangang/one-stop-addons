@@ -336,11 +336,9 @@ async def debug_rows(req):
     async with LOCKS.setdefault(acct, asyncio.Lock()):
         await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
         await pg.wait_for_timeout(6000)
-        for _ in range(6):
-            await pg.mouse.wheel(0, 900); await pg.wait_for_timeout(800)
         info = await pg.evaluate("""() => {
-          const h = [...document.querySelectorAll('h2, .rowHeader, .row-header-title, [class*="rowTitle"]')].find(e => /continue watching/i.test(e.innerText || ''));
-          if (!h) return {err: 'no heading'};
+          const h = [...document.querySelectorAll('h2, .rowHeader, .row-header-title, [class*="rowTitle"]')].find(e => /continue watching/i.test(e.textContent || ''));
+          if (!h) return {err: 'no heading', url: location.href, heads: [...document.querySelectorAll('h2')].map(e => e.textContent).slice(0, 5)};
           let r = h, lvl = 0;
           for (; lvl < 8 && r; lvl++) { r = r.parentElement; if (r && r.querySelectorAll('img').length >= 2) break; }
           const tiles = [...r.querySelectorAll('img')].slice(0, 6).map(img => { let c = img; for (let i = 0; i < 6 && c && !(c.tagName === 'A' || c.getAttribute('role') || c.getAttribute('data-uia')); i++) c = c.parentElement;
