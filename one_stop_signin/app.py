@@ -322,7 +322,7 @@ async def _history(acct, pg, want, size, kind="history"):
 
 async def latest(req):
     """Diagnostics: read history with the most recently saved sign-in."""
-    files = sorted((f for f in os.listdir(DATA) if f.startswith("netflix_") and f.endswith(".json")), key=lambda f: os.path.getmtime(os.path.join(DATA, f)))
+    files = sorted((f for f in os.listdir(DATA) if f.startswith("netflix_") and f.endswith(".json") and not f.endswith(".meta.json")), key=lambda f: os.path.getmtime(os.path.join(DATA, f)))
     if not files:
         return web.json_response({"error": "no saved sign-in"})
     acct = files[-1][len("netflix_"):-len(".json")]
