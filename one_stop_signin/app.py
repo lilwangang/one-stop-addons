@@ -329,6 +329,24 @@ async def latest(req):
                               "titles": [(x.get("seriesTitle") or x.get("title")) for x in (res.get("items") or [])][:10]})
 
 
+async def debug_rows(req):
+    files = sorted((f for f in os.listdir(DATA) if f.startswith("netflix_") and f.endswith(".json") and not f.endswith(".meta.json")), key=lambda f: os.path.getmtime(os.path.join(DATA, f)))
+    acct = files[-1][len("netflix_"):-len(".json")]
+    pg = await account_page(acct)
+    async with LOCKS.setdefault(acct, asyncio.Lock()):
+        await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+        await pg.wait_for_timeout(6000)
+        for _ in range(6):
+            await pg.mouse.wheel(0, 900); await pg.wait_for_timeout(800)
+        info = await pg.evaluate("""() => ({url: location.href,
+          ctx: [...document.querySelectorAll('[data-list-context]')].map(e => e.getAttribute('data-list-context')).slice(0, 30),
+          heads: [...document.querySelectorAll('h2, .rowHeader, .row-header-title, [class*="rowTitle"]')].map(e => (e.innerText || '').trim()).filter(Boolean).slice(0, 30),
+          cw: (() => { const h = [...document.querySelectorAll('h2,h3,[class*="row"] *')].find(e => /continue watching/i.test(e.innerText || '') && (e.innerText||'').length < 60);
+                 if (!h) return null; let r = h; for (let i = 0; i < 6 && r; i++) { r = r.parentElement; if (r && r.querySelectorAll('a[href*="/watch/"], a[href*="/title/"]').length) break; }
+                 return r ? { cls: r.className, html: r.outerHTML.slice(0, 2500) } : null; })() })""")
+    return web.json_response(info)
+
+
 async def forget(req):
     data = await req.json()
     acct = data.get("account")
@@ -738,6 +756,7 @@ app.router.add_post("/netflix/profile", pick)
 app.router.add_post("/netflix/history", history)
 app.router.add_post("/netflix/forget", forget)
 app.router.add_get("/netflix/latest", latest)
+app.router.add_get("/netflix/debug_rows", debug_rows)
 app.router.add_post("/netflix/profiles", list_profiles)
 app.router.add_post("/disney/start", d_start)
 app.router.add_post("/disney/answer", d_answer)

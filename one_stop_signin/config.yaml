@@ -1,5 +1,5 @@
 name: One Stop Sign-in Helper
-version: "1.4.0"
+version: "1.4.1"
 slug: one_stop_signin
 description: Signs in to Netflix and Disney+ from inside Home Assistant so One Stop Streaming cards can show real watch history.
 url: https://github.com/lilwangang/one-stop-addons
