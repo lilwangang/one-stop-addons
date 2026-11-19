@@ -334,21 +334,6 @@ async def read_home(pg, per_row=20):
             if its:
                 out.append({"title": rows[k]["title"], "items": its})
         res = {"rows": out, "items": []}
-        cont = next((r for r in out if "continue watching" in r["title"].lower()), None)
-        if cont:   # have the episode lists ready for what they're in the middle of
-            eps = {}
-            try:
-                await pg.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=5000)
-            except Exception:
-                pass
-            for it in cont["items"][:12]:
-                try:
-                    d = await pg.evaluate(EPISODES_JS, it["id"])
-                    if not d.get("error"):
-                        eps[it["id"]] = d
-                except Exception:
-                    pass
-            res["episodes"] = eps
         if not out:
             res["debug"] = await pg.evaluate("[...document.querySelectorAll('h2')].map(e => e.textContent).slice(0, 12)")
         return res
@@ -377,17 +362,76 @@ EPISODES_JS = r"""async (id) => {
 }"""
 
 
+EP_FILE = os.path.join(DATA, "episodes_cache.json")
+try:
+    with open(EP_FILE) as fh:
+        EP_CACHE = json.load(fh)
+except Exception:
+    EP_CACHE = {}
+EP_FRESH = 24 * 3600
+
+
+def _ep_key(profile, vid):
+    return f"{profile or ''}|{vid}"
+
+
+def _ep_save():
+    try:
+        with open(EP_FILE + ".tmp", "w") as fh:
+            json.dump(EP_CACHE, fh)
+        os.replace(EP_FILE + ".tmp", EP_FILE)
+    except Exception:
+        log.exception("episode cache save failed")
+
+
+async def prefetch_episodes(pg, profile, rows, limit=200):
+    """Fetch episode lists for every show on the profile's home page so opening one is instant.
+    Continue Watching is always refreshed (progress moves); everything else once a day."""
+    now = time.time()
+    order, seen = [], set()
+    rows = sorted(rows, key=lambda r: 0 if "continue watching" in r["title"].lower() else 1 if "my list" in r["title"].lower() else 2)
+    for r in rows:
+        cw = "continue watching" in r["title"].lower()
+        for it in r["items"]:
+            vid = it["id"]
+            if vid in seen:
+                continue
+            seen.add(vid)
+            hit = EP_CACHE.get(_ep_key(profile, vid))
+            if cw or not hit or now - hit["t"] > EP_FRESH:
+                order.append(vid)
+    order = order[:limit]
+    if not order:
+        return 0
+    try:
+        await pg.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=6000)
+    except Exception:
+        pass
+    got = await pg.evaluate("async (ids) => { const one = " + EPISODES_JS + "; const out = {}; for (let i = 0; i < ids.length; i += 8) { await Promise.all(ids.slice(i, i + 8).map(async id => { try { out[id] = await one(id); } catch (e) {} })); } return out; }", order)
+    n = 0
+    for vid, d in (got or {}).items():
+        if d and not d.get("error"):
+            EP_CACHE[_ep_key(profile, vid)] = {"t": now, "d": d}
+            n += 1
+    _ep_save()
+    log.info("prefetched episodes for %d of %d titles", n, len(order))
+    return n
+
+
 async def episodes(req):
     """Seasons and episodes of a show for the chosen profile (with where they're up to)."""
     data = await req.json()
     acct, want, vid = data.get("account"), data.get("profile"), str(data.get("id") or "")
     if not vid.isdigit():
         return web.json_response({"error": "bad id"}, status=400)
+    meta = read_meta(acct)
+    hit = EP_CACHE.get(_ep_key(want or meta.get("active"), vid))
+    if hit and time.time() - hit["t"] < EP_FRESH:          # already loaded in the background
+        return web.json_response({**hit["d"], "cached_at": int(hit["t"])})
     pg = await account_page(acct)
     if pg is None:
         return web.json_response({"error": "unknown_account"}, status=404)
     lock = LOCKS.setdefault(acct, asyncio.Lock())
-    meta = read_meta(acct)
     if lock.locked() and (not want or want == meta.get("active")):   # busy refreshing: read from a second tab (same profile) instead of waiting
         c = ACCOUNTS[acct]
         side = c.get("side")
@@ -486,6 +530,11 @@ async def _history(acct, pg, want, size, kind="history"):
             with open(meta_path(acct), "w") as fh:
                 json.dump(meta, fh)
         res = await (read_home(pg) if kind == "home" else read_continue(pg, size) if kind == "continue" else read_history(pg, size))
+        if kind == "home" and res.get("rows"):
+            try:
+                await prefetch_episodes(pg, meta.get("active"), res["rows"])
+            except Exception:
+                log.exception("episode prefetch failed")
         res["profile_guid"] = meta.get("active")
         res["profiles"] = meta.get("profiles", [])
         if not res.get("error"):
