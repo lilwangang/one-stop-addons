@@ -334,6 +334,21 @@ async def read_home(pg, per_row=20):
             if its:
                 out.append({"title": rows[k]["title"], "items": its})
         res = {"rows": out, "items": []}
+        cont = next((r for r in out if "continue watching" in r["title"].lower()), None)
+        if cont:   # have the episode lists ready for what they're in the middle of
+            eps = {}
+            try:
+                await pg.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=5000)
+            except Exception:
+                pass
+            for it in cont["items"][:12]:
+                try:
+                    d = await pg.evaluate(EPISODES_JS, it["id"])
+                    if not d.get("error"):
+                        eps[it["id"]] = d
+                except Exception:
+                    pass
+            res["episodes"] = eps
         if not out:
             res["debug"] = await pg.evaluate("[...document.querySelectorAll('h2')].map(e => e.textContent).slice(0, 12)")
         return res
@@ -371,7 +386,20 @@ async def episodes(req):
     pg = await account_page(acct)
     if pg is None:
         return web.json_response({"error": "unknown_account"}, status=404)
-    async with LOCKS.setdefault(acct, asyncio.Lock()):
+    lock = LOCKS.setdefault(acct, asyncio.Lock())
+    meta = read_meta(acct)
+    if lock.locked() and (not want or want == meta.get("active")):   # busy refreshing: read from a second tab (same profile) instead of waiting
+        c = ACCOUNTS[acct]
+        side = c.get("side")
+        if side is None or side.is_closed():
+            side = c["side"] = await c["ctx"].new_page()
+            await side.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+            try:
+                await side.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=8000)
+            except Exception:
+                pass
+        return web.json_response(await side.evaluate(EPISODES_JS, vid))
+    async with lock:
         meta = read_meta(acct)
         if want and want != meta.get("active") and any(p["guid"] == want for p in meta.get("profiles", [])):
             await pg.goto(f"https://www.netflix.com/SwitchProfile?tkn={want}", wait_until="domcontentloaded")
