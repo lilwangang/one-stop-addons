@@ -384,7 +384,7 @@ def _ep_save():
         log.exception("episode cache save failed")
 
 
-async def prefetch_episodes(pg, profile, rows, limit=200):
+def episodes_to_fetch(profile, rows, limit=300):
     """Fetch episode lists for every show on the profile's home page so opening one is instant.
     Continue Watching is always refreshed (progress moves); everything else once a day."""
     now = time.time()
@@ -400,9 +400,11 @@ async def prefetch_episodes(pg, profile, rows, limit=200):
             hit = EP_CACHE.get(_ep_key(profile, vid))
             if cw or not hit or now - hit["t"] > EP_FRESH:
                 order.append(vid)
-    order = order[:limit]
-    if not order:
-        return 0
+    return order[:limit]
+
+
+async def fetch_episode_batch(pg, profile, order):
+    now = time.time()
     try:
         await pg.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=6000)
     except Exception:
@@ -414,7 +416,7 @@ async def prefetch_episodes(pg, profile, rows, limit=200):
             EP_CACHE[_ep_key(profile, vid)] = {"t": now, "d": d}
             n += 1
     _ep_save()
-    log.info("prefetched episodes for %d of %d titles", n, len(order))
+    log.info("prefetched episodes for %d of %d titles (%s)", n, len(order), profile)
     return n
 
 
@@ -426,10 +428,13 @@ async def _prefetch_later(acct, pg, profile, rows):
         return
     PREFETCHING.add((acct, profile))
     try:
-        async with LOCKS.setdefault(acct, asyncio.Lock()):
-            if profile and read_meta(acct).get("active") != profile:
-                return            # someone switched profile meanwhile; the next refresh will do it
-            await prefetch_episodes(pg, profile, rows)
+        order = episodes_to_fetch(profile, rows)
+        for i in range(0, len(order), 16):        # small batches so other requests are never kept waiting long
+            async with LOCKS.setdefault(acct, asyncio.Lock()):
+                if profile and read_meta(acct).get("active") != profile:
+                    return            # another profile is in use now; the next refresh carries on
+                await fetch_episode_batch(pg, profile, order[i:i + 16])
+            await asyncio.sleep(0.2)
     except Exception:
         log.exception("episode prefetch failed")
     finally:
