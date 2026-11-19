@@ -275,6 +275,72 @@ async def read_continue(pg, size=40):
     return {"items": [{**x, "date": now - i * 60000, "nodate": True, "kind": "continue"} for i, x in enumerate(items[:size])]}
 
 
+HOME_JS = r"""() => {
+  const out = [];
+  const heads = [...document.querySelectorAll('h2, .rowHeader, .row-header-title')];
+  for (const h of heads) {
+    const title = (h.textContent || '').replace(/\s+/g, ' ').trim(); if (!title || title.length > 80) continue;
+    let r = h; for (let i = 0; i < 6 && r; i++) { r = r.parentElement; if (r && r.querySelector('a[href*="jbv="], a[href*="/watch/"], a[href*="/title/"]')) break; }
+    if (!r) continue;
+    const items = [];
+    for (const a of r.querySelectorAll('a[href*="jbv="], a[href*="/watch/"], a[href*="/title/"]')) {
+      const m = (a.getAttribute('href') || '').match(/(?:jbv=|watch\/|title\/)(\d+)/); if (!m) continue;
+      const img = a.querySelector('img');
+      const name = (a.getAttribute('aria-label') || (img && img.alt) || a.textContent || '').trim();
+      const bar = [...a.querySelectorAll('[style*="width"]')].map(e => parseFloat(e.style.width)).find(w => !isNaN(w) && w > 0 && w <= 100);
+      items.push({ id: m[1], title: name, image: img ? (img.currentSrc || img.src) : null, progress: bar != null ? Math.round(bar) : null });
+    }
+    if (items.length) out.push({ title, items });
+  }
+  return { rows: out, height: document.documentElement.scrollHeight, y: window.scrollY };
+}"""
+
+
+async def read_home(pg, per_row=20):
+    """Every row of the profile's Netflix home page (Continue Watching, My List, Top 10, Because you watched ...)."""
+    await pg.set_viewport_size({"width": 1920, "height": 1080})
+    try:
+        await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+        if "/login" in pg.url:
+            return {"error": "signed_out"}
+        try:
+            await pg.wait_for_selector('a[href*="jbv="], a[href*="/watch/"]', timeout=12000)
+        except Exception:
+            pass
+        await pg.wait_for_timeout(800)
+        rows, order, last_h, same = {}, [], 0, 0
+        for _ in range(40):
+            got = await pg.evaluate(HOME_JS)
+            for r in got["rows"]:
+                key = r["title"].lower()
+                if key not in rows:
+                    rows[key] = {"title": r["title"], "items": {}}; order.append(key)
+                for it in r["items"]:
+                    old = rows[key]["items"].get(it["id"])
+                    if not old or (not old.get("image") and it.get("image")):
+                        rows[key]["items"][it["id"]] = it
+            await pg.mouse.wheel(0, 900)
+            await pg.wait_for_timeout(450)
+            y = await pg.evaluate("window.scrollY + window.innerHeight")
+            same = same + 1 if y >= got["height"] - 5 and got["height"] == last_h else 0
+            last_h = got["height"]
+            if same >= 3:
+                break
+        out = []
+        for k in order:
+            its = [i for i in rows[k]["items"].values() if i.get("title")][:per_row]
+            for i in its:
+                i["url"] = f"https://www.netflix.com/title/{i['id']}"
+            if its:
+                out.append({"title": rows[k]["title"], "items": its})
+        res = {"rows": out, "items": []}
+        if not out:
+            res["debug"] = await pg.evaluate("[...document.querySelectorAll('h2')].map(e => e.textContent).slice(0, 12)")
+        return res
+    finally:
+        await pg.set_viewport_size({"width": 1280, "height": 900})
+
+
 async def account_page(acct):
     c = ACCOUNTS.get(acct)
     if c and not c["pg"].is_closed():
@@ -340,7 +406,7 @@ async def _history(acct, pg, want, size, kind="history"):
             meta["active"] = want
             with open(meta_path(acct), "w") as fh:
                 json.dump(meta, fh)
-        res = await (read_continue(pg, size) if kind == "continue" else read_history(pg, size))
+        res = await (read_home(pg) if kind == "home" else read_continue(pg, size) if kind == "continue" else read_history(pg, size))
         res["profile_guid"] = meta.get("active")
         res["profiles"] = meta.get("profiles", [])
         if not res.get("error"):
