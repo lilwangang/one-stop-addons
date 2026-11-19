@@ -92,10 +92,15 @@ async def profile_list(pg):
     """[{guid, name}] from Netflix's 'Who's watching?' screen."""
     if "/browse" not in pg.url and "/profiles" not in pg.url:
         await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
-    await pg.wait_for_timeout(3000)
-    return await pg.evaluate("""() => [...document.querySelectorAll('[data-uia^="profile-selector+tile-"]')].map(e => ({
-        guid: e.getAttribute('data-uia').split('tile-')[1], name: (e.innerText || '').trim().split('\\n')[0] }))
-        .filter(p => p.guid && p.name)""")
+    try:
+        await pg.wait_for_selector('[data-uia^="profile-selector+tile-"]', timeout=8000)
+    except Exception:
+        await pg.wait_for_timeout(1000)
+    return await pg.evaluate("""() => [...document.querySelectorAll('[data-uia^="profile-selector+tile-"]')].map(e => {
+        const img = e.querySelector('img'); let av = img ? (img.currentSrc || img.src) : '';
+        if (!av) { const bg = e.querySelector('[style*="background-image"]'); const m = bg && bg.style.backgroundImage.match(/url\\(["']?([^"')]+)/); av = m ? m[1] : ''; }
+        return { guid: e.getAttribute('data-uia').split('tile-')[1], name: (e.innerText || '').trim().split('\\n')[0], avatar: av };
+      }).filter(p => p.guid && p.name)""")
 
 
 def meta_path(acct):
@@ -232,7 +237,10 @@ async def read_continue(pg, size=40):
     await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
     if "/login" in pg.url:
         return {"error": "signed_out"}
-    await pg.wait_for_timeout(4000)
+    try:   # go as soon as the row is there (usually 2-3 s) instead of a fixed wait; missing row = nothing to continue
+        await pg.wait_for_function("""() => [...document.querySelectorAll('h2')].some(e => /continue watching/i.test(e.textContent || '') && e.closest('section') && e.closest('section').querySelector('a[data-uia="progress-card"], a[href*="jbv="]'))""", timeout=12000)
+    except Exception:
+        await pg.wait_for_timeout(500)
     items = []
     JS = """() => {
       const h = [...document.querySelectorAll('h2')].find(e => /continue watching/i.test(e.textContent || ''));
@@ -311,7 +319,7 @@ async def history(req):
 
 async def _history(acct, pg, want, size, kind="history"):
     meta = read_meta(acct)
-    if not meta.get("profiles"):          # older sign-ins didn't record the profiles; look them up once
+    if not meta.get("profiles") or any("avatar" not in p for p in meta["profiles"]):   # look profiles (and pictures) up once
         try:
             await pg.goto("https://www.netflix.com/profiles", wait_until="domcontentloaded")
             meta["profiles"] = await profile_list(pg)
