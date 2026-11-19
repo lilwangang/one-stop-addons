@@ -281,7 +281,7 @@ HOME_JS = r"""() => {
   for (const h of heads) {
     const title = (h.textContent || '').replace(/\s+/g, ' ').trim(); if (!title || title.length > 80) continue;
     let r = h; for (let i = 0; i < 6 && r; i++) { r = r.parentElement; if (r && r.querySelector('a[href*="jbv="], a[href*="/watch/"], a[href*="/title/"]')) break; }
-    if (!r) continue;
+    if (!r || r.querySelectorAll('h2').length > 1 || /privacy|cookie|^games$|mobile games/i.test(title)) continue;   // skip page-wide containers, the cookie panel and games (can't play on a TV)
     const items = [];
     for (const a of r.querySelectorAll('a[href*="jbv="], a[href*="/watch/"], a[href*="/title/"]')) {
       const m = (a.getAttribute('href') || '').match(/(?:jbv=|watch\/|title\/)(\d+)/); if (!m) continue;
