@@ -341,6 +341,57 @@ async def read_home(pg, per_row=20):
         await pg.set_viewport_size({"width": 1280, "height": 900})
 
 
+EPISODES_JS = r"""async (id) => {
+  const nf = window.netflix && window.netflix.reactContext;
+  const build = nf && nf.models && nf.models.serverDefs && nf.models.serverDefs.data && nf.models.serverDefs.data.BUILD_IDENTIFIER;
+  const urls = [];
+  if (build) urls.push(`/nq/website/memberapi/${build}/metadata?movieid=${id}&imageFormat=webp&withSize=true&materialize=true`, `/api/shakti/${build}/metadata?movieid=${id}`);
+  urls.push(`/nq/website/memberapi/release/metadata?movieid=${id}&imageFormat=webp&withSize=true&materialize=true`);
+  let last = 'no build id';
+  for (const u of urls) {
+    try { const r = await fetch(u, { credentials: 'include' }); if (!r.ok) { last = u.split('?')[0] + ' ' + r.status; continue; }
+      const d = await r.json(); const v = d && d.video; if (!v) { last = 'no video'; continue; }
+      const seasons = (v.seasons || []).map(s => ({ n: s.seq, title: s.title || s.longName || ('Season ' + s.seq),
+        eps: (s.episodes || []).map(e => { const st = (e.stills || [])[0] || {}; const len = e.runtime || 0, off = (e.bookmark && e.bookmark.offset) || 0;
+          return { id: String(e.episodeId || e.id), n: e.seq, t: e.title, d: e.synopsis || '', img: st.url || (e.thumbs && e.thumbs[0] && e.thumbs[0].url) || '', mins: len ? Math.round(len / 60) : null,
+                   progress: len && off ? Math.min(100, Math.round(100 * off / len)) : null, watched: !!(e.watchedToEndOffset && off >= e.watchedToEndOffset) }; }) }));
+      return { type: v.type, title: v.title, current: v.currentEpisode ? String(v.currentEpisode) : null, seasons };
+    } catch (e) { last = String(e); }
+  }
+  return { error: last };
+}"""
+
+
+async def episodes(req):
+    """Seasons and episodes of a show for the chosen profile (with where they're up to)."""
+    data = await req.json()
+    acct, want, vid = data.get("account"), data.get("profile"), str(data.get("id") or "")
+    if not vid.isdigit():
+        return web.json_response({"error": "bad id"}, status=400)
+    pg = await account_page(acct)
+    if pg is None:
+        return web.json_response({"error": "unknown_account"}, status=404)
+    async with LOCKS.setdefault(acct, asyncio.Lock()):
+        meta = read_meta(acct)
+        if want and want != meta.get("active") and any(p["guid"] == want for p in meta.get("profiles", [])):
+            await pg.goto(f"https://www.netflix.com/SwitchProfile?tkn={want}", wait_until="domcontentloaded")
+            await pg.wait_for_timeout(1500)
+            meta["active"] = want
+            with open(meta_path(acct), "w") as fh:
+                json.dump(meta, fh)
+            await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+        elif "netflix.com" not in pg.url or "/login" in pg.url:
+            await pg.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+        if "/login" in pg.url:
+            return web.json_response({"error": "signed_out"}, status=401)
+        try:
+            await pg.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=8000)
+        except Exception:
+            pass
+        res = await pg.evaluate(EPISODES_JS, vid)
+        return web.json_response(res)
+
+
 async def account_page(acct):
     c = ACCOUNTS.get(acct)
     if c and not c["pg"].is_closed():
@@ -898,6 +949,7 @@ app.router.add_get("/netflix/latest", latest)
 app.router.add_get("/netflix/debug_rows", debug_rows)
 app.router.add_get("/netflix/probe_va", probe_va)
 app.router.add_post("/netflix/profiles", list_profiles)
+app.router.add_post("/netflix/episodes", episodes)
 app.router.add_post("/disney/start", d_start)
 app.router.add_post("/disney/answer", d_answer)
 app.router.add_post("/disney/history", d_history)
