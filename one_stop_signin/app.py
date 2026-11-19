@@ -418,6 +418,25 @@ async def prefetch_episodes(pg, profile, rows, limit=200):
     return n
 
 
+async def _ep_eval(page, vid):
+    """Run the episode fetch; if the tab is on an error page or mid-navigation, reload Netflix once and retry."""
+    try:
+        d = await page.evaluate(EPISODES_JS, vid)
+    except Exception as err:
+        d = {"error": str(err)}
+    if d.get("error") and ("fetch" in str(d["error"]).lower() or "context" in str(d["error"]).lower() or "build" in str(d["error"]).lower()):
+        try:
+            await page.goto("https://www.netflix.com/browse", wait_until="domcontentloaded", timeout=45000)
+            await page.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=10000)
+        except Exception:
+            pass
+        try:
+            d = await page.evaluate(EPISODES_JS, vid)
+        except Exception as err:
+            d = {"error": str(err)}
+    return d
+
+
 async def episodes(req):
     """Seasons and episodes of a show for the chosen profile (with where they're up to)."""
     data = await req.json()
@@ -437,12 +456,18 @@ async def episodes(req):
         side = c.get("side")
         if side is None or side.is_closed():
             side = c["side"] = await c["ctx"].new_page()
-            await side.goto("https://www.netflix.com/browse", wait_until="domcontentloaded")
+            try:
+                await side.goto("https://www.netflix.com/browse", wait_until="domcontentloaded", timeout=45000)
+            except Exception:
+                pass
             try:
                 await side.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=8000)
             except Exception:
                 pass
-        return web.json_response(await side.evaluate(EPISODES_JS, vid))
+        d = await _ep_eval(side, vid)
+        if not d.get("error"):
+            EP_CACHE[_ep_key(want or meta.get("active"), vid)] = {"t": time.time(), "d": d}
+        return web.json_response(d)
     async with lock:
         meta = read_meta(acct)
         if want and want != meta.get("active") and any(p["guid"] == want for p in meta.get("profiles", [])):
@@ -460,7 +485,9 @@ async def episodes(req):
             await pg.wait_for_function("() => window.netflix && window.netflix.reactContext", timeout=8000)
         except Exception:
             pass
-        res = await pg.evaluate(EPISODES_JS, vid)
+        res = await _ep_eval(pg, vid)
+        if not res.get("error"):
+            EP_CACHE[_ep_key(meta.get("active"), vid)] = {"t": time.time(), "d": res}
         return web.json_response(res)
 
 
