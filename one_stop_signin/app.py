@@ -418,6 +418,24 @@ async def prefetch_episodes(pg, profile, rows, limit=200):
     return n
 
 
+PREFETCHING = set()
+
+
+async def _prefetch_later(acct, pg, profile, rows):
+    if (acct, profile) in PREFETCHING:
+        return
+    PREFETCHING.add((acct, profile))
+    try:
+        async with LOCKS.setdefault(acct, asyncio.Lock()):
+            if profile and read_meta(acct).get("active") != profile:
+                return            # someone switched profile meanwhile; the next refresh will do it
+            await prefetch_episodes(pg, profile, rows)
+    except Exception:
+        log.exception("episode prefetch failed")
+    finally:
+        PREFETCHING.discard((acct, profile))
+
+
 async def _ep_eval(page, vid):
     """Run the episode fetch; if the tab is on an error page or mid-navigation, reload Netflix once and retry."""
     try:
@@ -557,11 +575,8 @@ async def _history(acct, pg, want, size, kind="history"):
             with open(meta_path(acct), "w") as fh:
                 json.dump(meta, fh)
         res = await (read_home(pg) if kind == "home" else read_continue(pg, size) if kind == "continue" else read_history(pg, size))
-        if kind == "home" and res.get("rows"):
-            try:
-                await prefetch_episodes(pg, meta.get("active"), res["rows"])
-            except Exception:
-                log.exception("episode prefetch failed")
+        if kind == "home" and res.get("rows"):   # load episode lists afterwards, without delaying this answer
+            asyncio.get_running_loop().create_task(_prefetch_later(acct, pg, meta.get("active"), res["rows"]))
         res["profile_guid"] = meta.get("active")
         res["profiles"] = meta.get("profiles", [])
         if not res.get("error"):
